@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -51,15 +53,6 @@ const (
 	// sendAndWait's own timeout.
 	launchConfirmTimeout = 30 * time.Second
 	launchConfirmPoll    = 500 * time.Millisecond
-
-	// maxQueueItemPlaybackDuration is sent as a QueueItem's playbackDuration
-	// for LoadRepeating. Per the Cast QueueItem semantics, a value larger
-	// than the media's real duration is simply clamped down to it — but a
-	// zero value (Go's zero value for int, which is what an unset field
-	// would serialize as) means "don't play this item at all". Any value
-	// safely larger than a slideshow video is fine; this is comfortably
-	// larger than any realistic one.
-	maxQueueItemPlaybackDuration = 24 * 60 * 60
 )
 
 type PlayedItem struct {
@@ -94,6 +87,7 @@ type App interface {
 	Skipad() error
 	Load(filenameOrUrl string, startTime int, contentType string, transcode, detach, forceDetach bool) error
 	LoadRepeating(filenameOrUrl string, contentType string, transcode bool) error
+	LoadRepeatingWithMode(filenameOrUrl string, contentType string, transcode bool, repeatMode string) error
 	QueueLoad(filenames []string, contentType string, transcode bool) error
 	Transcode(contentType string, command string, args ...string) error
 	Next() error
@@ -907,24 +901,41 @@ func (a *Application) play(filenameOrUrl string, startTime int, contentType stri
 	return nil
 }
 
-// LoadRepeating loads a single media file and tells the chromecast to repeat
-// it forever using the Cast queueing API's native repeatMode, instead of
+// LoadRepeating loads a single media file using REPEAT_SINGLE, the appropriate
+// default for repeating one current item.
+func (a *Application) LoadRepeating(filenameOrUrl string, contentType string, transcode bool) error {
+	return a.LoadRepeatingWithMode(filenameOrUrl, contentType, transcode, cast.RepeatModeSingle)
+}
+
+// LoadRepeatingWithMode loads a single media file and tells the chromecast to repeat
+// it forever using the selected Cast queueing API repeat mode, instead of
 // Load's approach of the sender waiting for the media to finish and then
 // reloading it — which on every play-through re-does the whole handshake
 // (relaunch check, fresh LOAD, receiver rebuffering) and shows the receiver's
-// idle screen in the gap. With repeatMode=REPEAT_ALL the receiver loops on
-// its own without any further command from the sender.
+// idle screen in the gap. REPEAT_SINGLE repeats the current item directly;
+// REPEAT_ALL would advance through the queue at every boundary, even when the
+// queue contains only one item. Some receivers (notably Philips Android TVs)
+// stall during that needless one-item queue transition.
 //
-// This still blocks on MediaWait, same as Load: for a local file, the video
-// is served by an HTTP server embedded in this same process
-// (loadAndServeFiles/startStreamingServer) — returning early would let the
-// process exit and take that server down with it, breaking every loop after
-// the first. Blocking is harmless here: with REPEAT_ALL there is no item-less
-// FINISHED event to unblock MediaWait (see recvMessages' MEDIA_STATUS case —
-// LoadingItemId is non-zero while the queue loops back to repeat), so this
-// only returns when something has gone genuinely wrong (CLOSE, app changed,
-// load failure) — exactly when the caller should know about it anyway.
-func (a *Application) LoadRepeating(filenameOrUrl string, contentType string, transcode bool) error {
+// For a LOCAL file this blocks until the process is signalled, because the
+// video is streamed from an HTTP server embedded in this very process
+// (loadAndServeFiles/startStreamingServer) and native repeat may re-read it at
+// a loop boundary — the server therefore has to outlive the media session for
+// as long as the loop should run.
+//
+// Deliberately NOT MediaWait: that returns on CLOSE as well as FINISHED (see
+// recvMessages), and some TVs — Philips Android TVs notably — close the sender
+// connection while playback is still going. Waiting on it would let this
+// process exit mid-loop, killing the server and leaving the receiver
+// buffering a dead source until something else notices. Ending the loop is
+// the caller's decision (a supervising daemon's SIGTERM, or Ctrl-C), not the
+// TV's.
+func (a *Application) LoadRepeatingWithMode(filenameOrUrl string, contentType string, transcode bool, repeatMode string) error {
+	if repeatMode != cast.RepeatModeSingle && repeatMode != cast.RepeatModeAll {
+		return fmt.Errorf("unsupported repeat mode %q", repeatMode)
+	}
+
+	isExternalMedia := strings.HasPrefix(filenameOrUrl, "http://") || strings.HasPrefix(filenameOrUrl, "https://")
 	mi, err := a.resolveMediaItem(filenameOrUrl, contentType, transcode)
 	if err != nil {
 		return err
@@ -937,15 +948,40 @@ func (a *Application) LoadRepeating(filenameOrUrl string, contentType string, tr
 	// NOTE: This isn't concurrent safe, but it doesn't need to be at the moment!
 	a.MediaStart()
 
-	a.sendMediaRecv(&cast.QueueLoad{
+	if err := a.sendMediaRecv(newRepeatingQueueLoad(mi, repeatMode)); err != nil {
+		return errors.Wrap(err, "unable to send repeating queue load")
+	}
+
+	// The receiver fetches an external URL itself, so once the queue is sent
+	// there is nothing of ours left for it to depend on.
+	if isExternalMedia {
+		return nil
+	}
+
+	// Keep serving the file until we're told to stop — see the note above on
+	// why this must not be tied to the media session's lifetime.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(stop)
+	<-stop
+	return nil
+}
+
+func newRepeatingQueueLoad(mi mediaItem, repeatMode string) *cast.QueueLoad {
+	return &cast.QueueLoad{
 		PayloadHeader: cast.QueueLoadHeader,
 		CurrentTime:   0,
 		StartIndex:    0,
-		RepeatMode:    "REPEAT_ALL",
+		RepeatMode:    repeatMode,
 		Items: []cast.QueueLoadItem{
 			{
-				Autoplay:         true,
-				PlaybackDuration: maxQueueItemPlaybackDuration,
+				Autoplay: true,
+				// PlaybackDuration deliberately unset (omitempty): the item
+				// should play for exactly as long as the media is. Sending a
+				// large sentinel here made the receiver buffer as though the
+				// item were that long, which stalled playback a few seconds
+				// in whenever the media had to be streamed rather than
+				// fetched in one go.
 				Media: cast.MediaItem{
 					ContentId:   mi.contentURL,
 					StreamType:  "BUFFERED",
@@ -953,12 +989,7 @@ func (a *Application) LoadRepeating(filenameOrUrl string, contentType string, tr
 				},
 			},
 		},
-	})
-
-	// Wait until we have been notified of a genuine terminal event — see the
-	// function comment for why REPEAT_ALL never trips this in the steady state.
-	a.MediaWait()
-	return nil
+	}
 }
 
 func (a *Application) LoadApp(appID, contentID string) error {

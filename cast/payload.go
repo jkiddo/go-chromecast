@@ -1,5 +1,10 @@
 package cast
 
+const (
+	RepeatModeSingle = "REPEAT_SINGLE"
+	RepeatModeAll    = "REPEAT_ALL"
+)
+
 var (
 	// Known Payload headers
 	ConnectHeader     = PayloadHeader{Type: "CONNECT"}
@@ -47,9 +52,15 @@ type QueueLoad struct {
 }
 
 type QueueLoadItem struct {
-	Media            MediaItem `json:"media"`
-	Autoplay         bool      `json:"autoplay"`
-	PlaybackDuration int       `json:"playbackDuration"`
+	Media    MediaItem `json:"media"`
+	Autoplay bool      `json:"autoplay"`
+	// omitempty so a caller can leave this unset and get the receiver's
+	// default (play the item for its natural duration). Sending an explicit
+	// value makes the receiver plan its buffering around that length, which
+	// starves playback when the number is much larger than the real media —
+	// and 0, the Go zero value, means "don't play this item at all", so the
+	// field cannot simply be left at zero and serialized.
+	PlaybackDuration int `json:"playbackDuration,omitempty"`
 }
 
 type MediaHeader struct {

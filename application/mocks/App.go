@@ -123,6 +123,24 @@ func (_m *App) LoadRepeating(filenameOrUrl string, contentType string, transcode
 	return r0
 }
 
+// LoadRepeatingWithMode provides a mock function with given fields: filenameOrUrl, contentType, transcode, repeatMode
+func (_m *App) LoadRepeatingWithMode(filenameOrUrl string, contentType string, transcode bool, repeatMode string) error {
+	ret := _m.Called(filenameOrUrl, contentType, transcode, repeatMode)
+
+	if len(ret) == 0 {
+		panic("no return value specified for LoadRepeatingWithMode")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(string, string, bool, string) error); ok {
+		r0 = rf(filenameOrUrl, contentType, transcode, repeatMode)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
 // Next provides a mock function with given fields:
 func (_m *App) Next() error {
 	ret := _m.Called()

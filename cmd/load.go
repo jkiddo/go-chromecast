@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"github.com/vishen/go-chromecast/cast"
 	"github.com/vishen/go-chromecast/ui"
 
 	"github.com/spf13/cobra"
@@ -45,6 +46,7 @@ that ffmpeg is installed.`,
 		detach, _ := cmd.Flags().GetBool("detach")
 		startTime, _ := cmd.Flags().GetInt("start-time")
 		repeat, _ := cmd.Flags().GetBool("repeat")
+		repeatMode, _ := cmd.Flags().GetString("repeat-mode")
 
 		// Repeat bypasses --with-ui/--detach/--start-time entirely: the
 		// receiver owns the loop from here via the Cast queueing API's
@@ -52,7 +54,16 @@ that ffmpeg is installed.`,
 		// local file server backing a local file stays up, but there's no
 		// per-loop command to attach a UI to or detach from.
 		if repeat {
-			if err := app.LoadRepeating(args[0], contentType, transcode); err != nil {
+			var castRepeatMode string
+			switch repeatMode {
+			case "single":
+				castRepeatMode = cast.RepeatModeSingle
+			case "all":
+				castRepeatMode = cast.RepeatModeAll
+			default:
+				exit("unsupported repeat mode %q: expected single or all", repeatMode)
+			}
+			if err := app.LoadRepeatingWithMode(args[0], contentType, transcode, castRepeatMode); err != nil {
 				exit("unable to load media: %v", err)
 			}
 			return
@@ -91,4 +102,5 @@ func init() {
 	loadCmd.Flags().StringP("content-type", "c", "", "content-type to serve the media file as")
 	loadCmd.Flags().Int("start-time", 0, "start time to play media, in seconds")
 	loadCmd.Flags().Bool("repeat", false, "repeat the media forever via the receiver's native queue repeat, instead of the sender reloading it on every play-through. Ignores --with-ui, --detach and --start-time")
+	loadCmd.Flags().String("repeat-mode", "single", "receiver repeat mode used with --repeat: single repeats the current item; all cycles the queue")
 }
