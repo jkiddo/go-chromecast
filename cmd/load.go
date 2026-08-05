@@ -44,6 +44,19 @@ that ffmpeg is installed.`,
 		transcode, _ := cmd.Flags().GetBool("transcode")
 		detach, _ := cmd.Flags().GetBool("detach")
 		startTime, _ := cmd.Flags().GetInt("start-time")
+		repeat, _ := cmd.Flags().GetBool("repeat")
+
+		// Repeat bypasses --with-ui/--detach/--start-time entirely: the
+		// receiver owns the loop from here via the Cast queueing API's
+		// native repeatMode. This still blocks (see LoadRepeating) so the
+		// local file server backing a local file stays up, but there's no
+		// per-loop command to attach a UI to or detach from.
+		if repeat {
+			if err := app.LoadRepeating(args[0], contentType, transcode); err != nil {
+				exit("unable to load media: %v", err)
+			}
+			return
+		}
 
 		// Optionally run a UI when playing this media:
 		runWithUI, _ := cmd.Flags().GetBool("with-ui")
@@ -77,4 +90,5 @@ func init() {
 	loadCmd.Flags().Bool("detach", false, "detach from waiting until media finished. Only works with url loaded external media")
 	loadCmd.Flags().StringP("content-type", "c", "", "content-type to serve the media file as")
 	loadCmd.Flags().Int("start-time", 0, "start time to play media, in seconds")
+	loadCmd.Flags().Bool("repeat", false, "repeat the media forever via the receiver's native queue repeat, instead of the sender reloading it on every play-through. Ignores --with-ui, --detach and --start-time")
 }

@@ -137,7 +137,8 @@ func outputStatus(app application.App, outputType outputType) {
 			case "x-youtube/video":
 				metadata = fmt.Sprintf("id=\"%s\", %s", castMedia.Media.ContentId, metadata)
 			}
-			outputInfo(">> %s (%s), %s, time remaining=%.2fs/%.2fs, volume=%0.2f, muted=%t", castApplication.DisplayName, castMedia.PlayerState, metadata, castMedia.CurrentTime, castMedia.Media.Duration, castVolume.Level, castVolume.Muted)
+			// position, not remaining: this is CurrentTime/Duration.
+			outputInfo(">> %s (%s), %s, position=%.2fs/%.2fs, volume=%0.2f, muted=%t", castApplication.DisplayName, castMedia.PlayerState, metadata, castMedia.CurrentTime, castMedia.Media.Duration, castVolume.Level, castVolume.Muted)
 		}
 	}
 }

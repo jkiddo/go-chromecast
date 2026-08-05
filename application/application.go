@@ -44,6 +44,22 @@ const (
 	namespaceConn  = "urn:x-cast:com.google.cast.tp.connection"
 	namespaceRecv  = "urn:x-cast:com.google.cast.receiver"
 	namespaceMedia = "urn:x-cast:com.google.cast.media"
+
+	// How long ensureIsAppID's fallback keeps asking the receiver whether the
+	// app it launched actually came up, and how often. A cold Default Media
+	// Receiver launch on a TV that has to wake its panel can take well over
+	// sendAndWait's own timeout.
+	launchConfirmTimeout = 30 * time.Second
+	launchConfirmPoll    = 500 * time.Millisecond
+
+	// maxQueueItemPlaybackDuration is sent as a QueueItem's playbackDuration
+	// for LoadRepeating. Per the Cast QueueItem semantics, a value larger
+	// than the media's real duration is simply clamped down to it — but a
+	// zero value (Go's zero value for int, which is what an unset field
+	// would serialize as) means "don't play this item at all". Any value
+	// safely larger than a slideshow video is fine; this is comfortably
+	// larger than any realistic one.
+	maxQueueItemPlaybackDuration = 24 * 60 * 60
 )
 
 type PlayedItem struct {
@@ -77,6 +93,7 @@ type App interface {
 	SeekToTime(value float32) error
 	Skipad() error
 	Load(filenameOrUrl string, startTime int, contentType string, transcode, detach, forceDetach bool) error
+	LoadRepeating(filenameOrUrl string, contentType string, transcode bool) error
 	QueueLoad(filenames []string, contentType string, transcode bool) error
 	Transcode(contentType string, command string, args ...string) error
 	Next() error
@@ -826,31 +843,34 @@ func (a *Application) Load(filenameOrUrl string, startTime int, contentType stri
 	return a.play(filenameOrUrl, startTime, contentType, transcode, detach, forceDetach)
 }
 
-func (a *Application) play(filenameOrUrl string, startTime int, contentType string, transcode, detach, forceDetach bool) error {
-
-	var mi mediaItem
-	isExternalMedia := false
+// resolveMediaItem turns a local filename or an http(s) URL into the
+// mediaItem play/LoadRepeating send to the chromecast — starting the local
+// streaming server for a local file, or just wrapping the URL as-is.
+func (a *Application) resolveMediaItem(filenameOrUrl, contentType string, transcode bool) (mediaItem, error) {
 	if strings.HasPrefix(filenameOrUrl, "http://") || strings.HasPrefix(filenameOrUrl, "https://") {
-		isExternalMedia = true
 		if contentType == "" {
 			// Try and determine the content type, but if we can't,
 			// let the chromecast try and handle the media file anyway.
 			contentType, _ = a.possibleContentType(filenameOrUrl)
 		}
-		mi = mediaItem{
-			contentURL:  filenameOrUrl,
-			contentType: contentType,
-		}
-	} else {
-		mediaItems, err := a.loadAndServeFiles([]string{filenameOrUrl}, contentType, transcode)
-		if err != nil {
-			return errors.Wrap(err, "unable to load and serve files")
-		}
+		return mediaItem{contentURL: filenameOrUrl, contentType: contentType}, nil
+	}
 
-		if len(mediaItems) != 1 {
-			return fmt.Errorf("was expecting 1 media item, received %d", len(mediaItems))
-		}
-		mi = mediaItems[0]
+	mediaItems, err := a.loadAndServeFiles([]string{filenameOrUrl}, contentType, transcode)
+	if err != nil {
+		return mediaItem{}, errors.Wrap(err, "unable to load and serve files")
+	}
+	if len(mediaItems) != 1 {
+		return mediaItem{}, fmt.Errorf("was expecting 1 media item, received %d", len(mediaItems))
+	}
+	return mediaItems[0], nil
+}
+
+func (a *Application) play(filenameOrUrl string, startTime int, contentType string, transcode, detach, forceDetach bool) error {
+	isExternalMedia := strings.HasPrefix(filenameOrUrl, "http://") || strings.HasPrefix(filenameOrUrl, "https://")
+	mi, err := a.resolveMediaItem(filenameOrUrl, contentType, transcode)
+	if err != nil {
+		return err
 	}
 
 	if !forceDetach && !isExternalMedia && detach {
@@ -883,6 +903,60 @@ func (a *Application) play(filenameOrUrl string, startTime int, contentType stri
 	}
 
 	// Wait until we have been notified that the media has finished playing
+	a.MediaWait()
+	return nil
+}
+
+// LoadRepeating loads a single media file and tells the chromecast to repeat
+// it forever using the Cast queueing API's native repeatMode, instead of
+// Load's approach of the sender waiting for the media to finish and then
+// reloading it — which on every play-through re-does the whole handshake
+// (relaunch check, fresh LOAD, receiver rebuffering) and shows the receiver's
+// idle screen in the gap. With repeatMode=REPEAT_ALL the receiver loops on
+// its own without any further command from the sender.
+//
+// This still blocks on MediaWait, same as Load: for a local file, the video
+// is served by an HTTP server embedded in this same process
+// (loadAndServeFiles/startStreamingServer) — returning early would let the
+// process exit and take that server down with it, breaking every loop after
+// the first. Blocking is harmless here: with REPEAT_ALL there is no item-less
+// FINISHED event to unblock MediaWait (see recvMessages' MEDIA_STATUS case —
+// LoadingItemId is non-zero while the queue loops back to repeat), so this
+// only returns when something has gone genuinely wrong (CLOSE, app changed,
+// load failure) — exactly when the caller should know about it anyway.
+func (a *Application) LoadRepeating(filenameOrUrl string, contentType string, transcode bool) error {
+	mi, err := a.resolveMediaItem(filenameOrUrl, contentType, transcode)
+	if err != nil {
+		return err
+	}
+
+	if err := a.ensureIsDefaultMediaReceiver(); err != nil {
+		return err
+	}
+
+	// NOTE: This isn't concurrent safe, but it doesn't need to be at the moment!
+	a.MediaStart()
+
+	a.sendMediaRecv(&cast.QueueLoad{
+		PayloadHeader: cast.QueueLoadHeader,
+		CurrentTime:   0,
+		StartIndex:    0,
+		RepeatMode:    "REPEAT_ALL",
+		Items: []cast.QueueLoadItem{
+			{
+				Autoplay:         true,
+				PlaybackDuration: maxQueueItemPlaybackDuration,
+				Media: cast.MediaItem{
+					ContentId:   mi.contentURL,
+					StreamType:  "BUFFERED",
+					ContentType: mi.contentType,
+				},
+			},
+		},
+	})
+
+	// Wait until we have been notified of a genuine terminal event — see the
+	// function comment for why REPEAT_ALL never trips this in the steady state.
 	a.MediaWait()
 	return nil
 }
@@ -970,12 +1044,44 @@ func (a *Application) ensureIsAppID(appID string) error {
 		})
 
 		if err != nil {
-			return errors.Wrapf(err, "unable to change to appID %q", appID)
+			// Not every device answers a LAUNCH with a RECEIVER_STATUS
+			// carrying our requestId. Philips Android TVs, launching from
+			// a fully idle state, reply with an intermediate
+			// LAUNCH_STATUS/USER_ALLOWED and then only an unsolicited
+			// (requestId 0) RECEIVER_STATUS — so sendAndWait's response
+			// never arrives and it fails after its timeout even though the
+			// app does come up a moment later. Rather than trust that
+			// timeout, ask the receiver directly whether the app we wanted
+			// is now running.
+			if waitErr := a.waitForAppID(appID); waitErr != nil {
+				return errors.Wrapf(err, "unable to change to appID %q", appID)
+			}
+			return nil
 		}
 		// Update the 'application' and 'media' field on the 'CastApplication'
 		return a.Update()
 	}
 	return nil
+}
+
+// waitForAppID polls the receiver until appID is the running application, and
+// is the fallback for devices whose LAUNCH reply we never see (see
+// ensureIsAppID). It leaves a.application/a.media populated on success,
+// because Update is what confirms the app.
+func (a *Application) waitForAppID(appID string) error {
+	deadline := time.Now().Add(launchConfirmTimeout)
+	for {
+		// Update also refreshes a.application, so a success here leaves the
+		// Application in the same state the non-fallback path would.
+		if err := a.Update(); err == nil &&
+			a.application != nil && a.application.AppId == appID {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out confirming appID %q launched", appID)
+		}
+		time.Sleep(launchConfirmPoll)
+	}
 }
 
 func (a *Application) Slideshow(filenames []string, duration int, repeat bool) error {

@@ -30,8 +30,15 @@ var statusCmd = &cobra.Command{
 			exit("unable to get cast application: %v", err)
 		}
 		castApplication, castMedia, castVolume := app.Status()
-		volumeLevel := castVolume.Level
-		volumeMuted := castVolume.Muted
+		// A fully idle device (e.g. right after `stop`, which nils these out)
+		// reports no volume at all — the nil case below handles the missing
+		// application, so don't dereference the volume before reaching it.
+		var volumeLevel float32
+		var volumeMuted bool
+		if castVolume != nil {
+			volumeLevel = castVolume.Level
+			volumeMuted = castVolume.Muted
+		}
 
 		contentId, _ := cmd.Flags().GetBool("content-id")
 
@@ -74,7 +81,8 @@ var statusCmd = &cobra.Command{
 					metadata = "unknown"
 
 				}
-				outputInfo("%s%s (%s), %s, time remaining=%.0fs/%.0fs, volume=%0.2f, muted=%t", usefulID, displayName, castMedia.PlayerState, metadata, castMedia.CurrentTime, castMedia.Media.Duration, volumeLevel, volumeMuted)
+				// position, not remaining: this is CurrentTime/Duration.
+				outputInfo("%s%s (%s), %s, position=%.0fs/%.0fs, volume=%0.2f, muted=%t", usefulID, displayName, castMedia.PlayerState, metadata, castMedia.CurrentTime, castMedia.Media.Duration, volumeLevel, volumeMuted)
 			}
 		}
 	},
