@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -31,7 +32,7 @@ import (
 
 var (
 	// Global request id
-	requestID int
+	requestID atomic.Int64
 	_         App = &Application{}
 )
 
@@ -109,6 +110,7 @@ type Application struct {
 
 	// Internal mapping of request id to result channel
 	resultChanMap map[int]chan *pb.CastMessage
+	resultMu      sync.Mutex
 
 	messageMu sync.Mutex
 	// Relay messages received so users can add custom logic to
@@ -292,11 +294,18 @@ func (a *Application) MediaFinished() {
 }
 
 func (a *Application) recvMessages() {
+	defer a.closeChanOnce.Do(func() { close(a.messageChan) })
 	for msg := range a.conn.MsgChan() {
 		requestID, err := jsonparser.GetInt([]byte(*msg.PayloadUtf8), "requestId")
 		if err == nil {
-			if resultChan, ok := a.resultChanMap[int(requestID)]; ok {
-				resultChan <- msg
+			a.resultMu.Lock()
+			resultChan, ok := a.resultChanMap[int(requestID)]
+			a.resultMu.Unlock()
+			if ok {
+				select {
+				case resultChan <- msg:
+				default:
+				}
 				// Relay the event to any user specified message funcs.
 				a.messageChan <- msg
 				continue
@@ -452,9 +461,6 @@ func (a *Application) Close(stopMedia bool) error {
 		a.sendMediaConn(&cast.CloseHeader)
 		a.sendDefaultConn(&cast.CloseHeader)
 	}
-	defer a.closeChanOnce.Do(func() {
-		close(a.messageChan)
-	})
 	return a.conn.Close()
 }
 
@@ -1394,31 +1400,29 @@ func (a *Application) log(message string, args ...interface{}) {
 }
 
 func (a *Application) send(payload cast.Payload, sourceID, destinationID, namespace string) (int, error) {
-	// NOTE: Not concurrent safe, but currently only synchronous flow is possible
-	// TODO(vishen): just make concurrent safe regardless of current flow
-	requestID += 1
-	payload.SetRequestId(requestID)
-	return requestID, a.conn.Send(requestID, payload, sourceID, destinationID, namespace)
+	id := int(requestID.Add(1))
+	payload.SetRequestId(id)
+	return id, a.conn.Send(id, payload, sourceID, destinationID, namespace)
 }
 
 func (a *Application) sendAndWait(payload cast.Payload, sourceID, destinationID, namespace string) (*pb.CastMessage, error) {
-	requestID, err := a.send(payload, sourceID, destinationID, namespace)
-	if err != nil {
+	id := int(requestID.Add(1))
+	payload.SetRequestId(id)
+	resultChan := make(chan *pb.CastMessage, 1)
+	// Register before writing: a local receiver can answer before Send returns.
+	a.resultMu.Lock()
+	a.resultChanMap[id] = resultChan
+	a.resultMu.Unlock()
+	defer func() {
+		a.resultMu.Lock()
+		delete(a.resultChanMap, id)
+		a.resultMu.Unlock()
+	}()
+	if err := a.conn.Send(id, payload, sourceID, destinationID, namespace); err != nil {
 		return nil, err
 	}
-
-	// Set a timeout to wait for the response
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	// TODO(vishen): not concurrent safe. Not a problem at the moment
-	// because only synchronous flow currently allowed.
-	resultChan := make(chan *pb.CastMessage, 1)
-	a.resultChanMap[requestID] = resultChan
-	defer func() {
-		delete(a.resultChanMap, requestID)
-	}()
-
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -1427,8 +1431,6 @@ func (a *Application) sendAndWait(payload cast.Payload, sourceID, destinationID,
 	}
 }
 
-// TODO(vishen): needing send(AndWait)* method seems a bit clunky, is there a better approach?
-// Maybe having a struct that has send and sendAndWait, similar to before.
 func (a *Application) sendDefaultConn(payload cast.Payload) error {
 	_, err := a.send(payload, defaultSender, defaultRecv, namespaceConn)
 	return err

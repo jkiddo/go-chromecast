@@ -41,6 +41,7 @@ type Connection struct {
 
 	recvMsgChan   chan *pb.CastMessage
 	closeChanOnce sync.Once
+	receiveWG     sync.WaitGroup
 
 	debug     bool
 	connected bool
@@ -67,21 +68,26 @@ func (c *Connection) Start(addr string, port int) error {
 		var ctx context.Context
 		// TODO: Receive context through function params?
 		ctx, c.cancel = context.WithCancel(context.Background())
+		c.receiveWG.Add(1)
 		go c.receiveLoop(ctx)
 	}
 	return nil
 }
 
+// Close interrupts network I/O and waits until the sole channel producer exits.
+// Closing MsgChan before receiveLoop stops races with in-flight device events.
 func (c *Connection) Close() error {
-	// TODO: nothing here is concurrent safe, fix?
 	c.connected = false
 	if c.cancel != nil {
 		c.cancel()
 	}
-	defer c.closeChanOnce.Do(func() {
-		close(c.recvMsgChan)
-	})
-	return c.conn.Close()
+	var err error
+	if c.conn != nil {
+		err = c.conn.Close()
+	}
+	c.receiveWG.Wait()
+	c.closeChanOnce.Do(func() { close(c.recvMsgChan) })
+	return err
 }
 
 func (c *Connection) SetDebug(debug bool) { c.debug = debug }
@@ -157,6 +163,8 @@ func (c *Connection) Send(requestID int, payload Payload, sourceID, destinationI
 }
 
 func (c *Connection) receiveLoop(ctx context.Context) {
+	defer c.receiveWG.Done()
+	defer c.closeChanOnce.Do(func() { close(c.recvMsgChan) })
 	for {
 		select {
 		case <-ctx.Done():
@@ -212,11 +220,11 @@ func (c *Connection) receiveLoop(ctx context.Context) {
 			continue
 		}
 
-		c.handleMessage(requestIDi, message, &headers)
+		c.handleMessage(ctx, requestIDi, message, &headers)
 	}
 }
 
-func (c *Connection) handleMessage(requestID int, message *pb.CastMessage, headers *PayloadHeader) {
+func (c *Connection) handleMessage(ctx context.Context, requestID int, message *pb.CastMessage, headers *PayloadHeader) {
 
 	messageType, err := jsonparser.GetString([]byte(*message.PayloadUtf8), "type")
 	if err != nil {
@@ -230,6 +238,9 @@ func (c *Connection) handleMessage(requestID int, message *pb.CastMessage, heade
 			c.log("unable to respond to 'PING': %v", err)
 		}
 	default:
-		c.recvMsgChan <- message
+		select {
+		case c.recvMsgChan <- message:
+		case <-ctx.Done():
+		}
 	}
 }

@@ -344,3 +344,85 @@ $ go-chromecast tts '<speak>Hello<break time="500ms"/>world.</speak>' \
   --google-service-account=/path/to/service/account.json \
   --ssml
 ```
+
+
+## Receiver simulator
+
+The `simulator` package and `cmd/simulator` command use the same lifecycle and
+playback controls as the simulator in goatv. They accept real network
+connections; no physical TV, media download or Internet connection is needed.
+
+```sh
+# Terminal 1: run a receiver with a clock that advances in real time.
+go run ./cmd/simulator -listen 127.0.0.1:8009 -duration 30s
+
+# Terminal 2: send a URL using the normal client.
+go run . --addr 127.0.0.1 --port 8009 --disable-cache load --content-type video/mp4 --detach https://example.invalid/video.mp4
+```
+
+The command prints its address and discovery records as JSON, followed by playback
+state changes. The default bind address is `127.0.0.1:0` (an ephemeral port).
+Stop it with Ctrl-C. Flags shared by both commands are `-listen`, `-name`,
+`-duration` and `-mdns-ip`.
+
+Discovery is disabled by default. To let another machine discover
+this receiver, bind to a reachable interface and explicitly enable mDNS:
+
+```sh
+go run ./cmd/simulator -listen 0.0.0.0:8009 -mdns-ip 192.168.1.35 -name "Broadster Test Cast"
+```
+
+Replace the example address with the simulator host's LAN address. This advertises
+`_googlecast._tcp`. Multicast must reach the scanner, and the TCP port must be
+reachable. These development receivers have no production access controls.
+
+### Use from Go tests
+
+```go
+receiver, err := simulator.New(simulator.Config{Duration: 10 * time.Second})
+if err != nil {
+    t.Fatal(err)
+}
+t.Cleanup(func() { _ = receiver.Close() })
+// Connect the real client to 127.0.0.1 and receiver.Port().
+// Then make assertions using receiver.Snapshot().
+```
+
+| Shared API | Behavior |
+| --- | --- |
+| `Addr()`, `Port()` | Discover the actual bound endpoint |
+| `Snapshot()` | Copy URL, playback state, position, duration and play/loop counts |
+| `Advance(duration)` | Move playback time deterministically; paused media stays paused |
+| `Finish()` | End playback, including a repeating item |
+| `FailNextPlay()` | Reject the next play request; normal protocol retry rules still apply |
+| `Disconnect()` | Drop current control connections, preserve playback, allow reconnection |
+| `Close()` | Stop discovery and close listeners/connections; safe to repeat |
+| `TXTRecords()` | Inspect the records used for discovery without enabling multicast |
+
+The package clock advances only through `Advance`; the command calls it on a
+real-time ticker. Tests use random loopback ports and do not advertise on the LAN.
+
+The receiver implements Cast V2 TLS/protobuf framing, heartbeat replies,
+application launch/status, URL load, single-item queues, pause/resume, seek,
+volume, stop and playback completion. Both `REPEAT_SINGLE` and single-item
+`REPEAT_ALL` survive control-client disconnection. Multi-item queues and Cast
+device-auth are not implemented. `FailNextPlay` returns `LOAD_FAILED` once.
+
+The tests exercise both `cast.Connection` and the public `application` playback
+API against the network receiver. The existing interface-mock tests remain useful
+for smaller unit tests.
+
+These are protocol simulators, not video players or complete device emulators.
+They record media URLs and report simulated progress; they do not validate codecs,
+HTTP media access, buffering, DRM, or picture/audio output. Keep hardware tests for
+those behaviors. Unsupported protocol commands are rejected explicitly.
+
+```sh
+go test -race ./...
+```
+
+To opt into the separate LAN discovery test, use this machine's actual IPv4:
+
+```sh
+SIMULATOR_MDNS_IP=192.168.1.35 go test -race ./simulator -run TestMDNSDiscovery -v
+```
