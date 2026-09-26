@@ -20,13 +20,20 @@ func TestApplicationWithSimulator(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app.Close(false)
+	idle, _, _ := app.Status()
+	if idle == nil || !idle.IsIdleScreen {
+		t.Fatalf("expected affirmative idle screen, got %+v", idle)
+	}
 	if err := app.LoadRepeating("http://example.invalid/video.mp4", "video/mp4", false); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.Update(); err != nil {
 		t.Fatal(err)
 	}
-	_, media, _ := app.Status()
+	running, media, _ := app.Status()
+	if running == nil || running.DisplayName != "Default Media Receiver" {
+		t.Fatalf("media receiver identity: %+v", running)
+	}
 	if media == nil || media.Media.ContentId != "http://example.invalid/video.mp4" || media.PlayerState != "PLAYING" {
 		t.Fatalf("media=%+v", media)
 	}

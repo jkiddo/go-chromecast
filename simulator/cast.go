@@ -197,10 +197,16 @@ func (r *Receiver) serve(conn net.Conn) {
 
 // Caller holds r.mu. Returned maps do not share mutable receiver state.
 func (r *Receiver) receiverStatus() map[string]any {
-	apps := []any{}
-	if r.appID != "" {
-		apps = append(apps, map[string]any{"appId": r.appID, "displayName": "Simulator Media Receiver", "sessionId": "simulator-session", "transportId": transportID, "isIdleScreen": false})
+	// An idle Chromecast runs Backdrop. No application is not affirmative
+	// idle evidence to a controller such as Broadster.
+	appID, displayName := r.appID, "Simulator Application"
+	if appID == "" {
+		appID, displayName = "E8C28D3C", "Backdrop"
 	}
+	if appID == "CC1AD845" {
+		displayName = "Default Media Receiver"
+	}
+	apps := []any{map[string]any{"appId": appID, "displayName": displayName, "sessionId": "simulator-session", "transportId": transportID, "isIdleScreen": r.appID == ""}}
 	volume := map[string]any{}
 	for k, v := range r.volume {
 		volume[k] = v
