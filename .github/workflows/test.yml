@@ -1,63 +1,66 @@
 name: Test
 
-on: 
+on:
   push:
     branches:
       - master
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Test the selected toolchain instead of silently downloading a newer one.
+  GOTOOLCHAIN: local
 
 jobs:
   test:
+    name: Tests (${{ matrix.platform }})
     strategy:
       matrix:
-        go-version: [1.21.x, 1.22.x, 1.23.x, 1.24.x]
         platform: [ubuntu-latest, macos-latest]
       fail-fast: false
     runs-on: ${{ matrix.platform }}
+    timeout-minutes: 20
     steps:
-    - name: Install Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: ${{ matrix.go-version }}
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Cache & restore go mod
-      uses: actions/cache@v4
-      id: cache
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
-    - name: Install Dependencies
-      if: steps.cache.outputs.cache-hit != 'true'
-      run: go mod download
-    - name: Test
-      run: go test ./...
-  build:
-    strategy:
-      matrix:
-        go-version: [1.21.x, 1.22.x, 1.23.x, 1.24.x]
-        platform: [ubuntu-latest, macos-latest]
-      fail-fast: false
-    runs-on: ${{ matrix.platform }}
+      - name: Checkout code
+        uses: actions/checkout@v7
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Verify dependencies
+        run: |
+          go mod download
+          go mod verify
+          go mod tidy -diff
+      - name: Static checks
+        run: go vet ./...
+      - name: Tests with race detection (including receiver simulator)
+        run: go test -race -count=1 ./...
+      - name: Build all commands
+        run: go build ./...
+
+  release-build:
+    name: Release cross-builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-    - name: Install Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: ${{ matrix.go-version }}
-    - name: Checkout code
-      uses: actions/checkout@v4
-    - name: Cache & restore go mod
-      uses: actions/cache@v4
-      id: cache
-      with:
-        path: ~/go/pkg/mod
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
-    - name: Install Dependencies
-      if: steps.cache.outputs.cache-hit != 'true'
-      run: go mod download
-    - name: Build
-      run: go build
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Build release archives without publishing
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: v2.18.2
+          args: release --snapshot --clean --skip=publish

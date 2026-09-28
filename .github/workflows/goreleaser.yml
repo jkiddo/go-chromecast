@@ -5,22 +5,43 @@ on:
     tags:
       - v*
 
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GOTOOLCHAIN: local
+
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@master
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version: '1.24.2'
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Validate tagged source before publishing
+        run: |
+          go mod download
+          go mod verify
+          go mod tidy -diff
+          go vet ./...
+          go test -race -count=1 ./...
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
-          version: '~> v2'
+          version: v2.18.2
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

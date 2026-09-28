@@ -426,3 +426,25 @@ To opt into the separate LAN discovery test, use this machine's actual IPv4:
 ```sh
 SIMULATOR_MDNS_IP=192.168.1.35 go test -race ./simulator -run TestMDNSDiscovery -v
 ```
+
+## Continuous integration
+
+The Test workflow checks the Go version declared in `go.mod` on Linux and macOS.
+It verifies module files, runs `go vet` and race-enabled tests (including the
+local TLS receiver simulator), and builds every command. A separate snapshot
+release job builds the desktop archives and Linux ARMv6/ARMv7 Pi binaries
+without publishing. Both release paths pin GoReleaser to the same version.
+Tagged releases repeat dependency checks, vet, and tests before publishing.
+
+Run the core checks locally with the Go version from `go.mod`:
+
+```sh
+go mod verify
+go mod tidy -diff
+go vet ./...
+go test -race -count=1 ./...
+go build ./...
+```
+
+LAN multicast discovery remains opt-in through `SIMULATOR_MDNS_IP`; hosted CI
+does not require a real Chromecast or multicast-capable network.
