@@ -79,6 +79,7 @@ type App interface {
 	Update() error
 	Pause() error
 	Unpause() error
+	SetPlaybackRate(rate float32) error
 	TogglePause() error
 	Stop() error
 	StopMedia() error
@@ -139,6 +140,13 @@ type Application struct {
 	// NOTE: Currently only playing one media file at a time is handled
 	mediaFinished  chan bool
 	mediaFilenames []string
+
+	// Subtitles to show with the media that is loaded: where they are,
+	// which ones if there are several, and their conversion to WebVTT if
+	// they had to be converted.
+	subtitles       string
+	subtitlesTrack  int
+	subtitlesWebVTT []byte
 
 	playedItems   map[string]PlayedItem
 	cacheDisabled bool
@@ -497,6 +505,22 @@ func (a *Application) Pause() error {
 	})
 }
 
+// SetPlaybackRate sets the playback rate of the playing media, where 1 is
+// the normal speed. The cast devices support rates between 0.5 and 2.
+func (a *Application) SetPlaybackRate(rate float32) error {
+	if a.media == nil {
+		return ErrNoMediaPlaybackRate
+	}
+	if rate < 0.5 || rate > 2 {
+		return ErrPlaybackRateRange
+	}
+	return a.sendMediaRecv(&cast.SetPlaybackRate{
+		PayloadHeader:  cast.PlaybackRateHeader,
+		MediaSessionId: a.media.MediaSessionId,
+		PlaybackRate:   rate,
+	})
+}
+
 func (a *Application) Unpause() error {
 	if a.media == nil {
 		return ErrNoMediaUnpause
@@ -802,7 +826,7 @@ func (a *Application) castPlayableContentType(contentType string) bool {
 	switch contentType {
 	case "image/apng", "image/bmp", "image/gif", "image/jpeg", "image/png", "image/webp":
 		return true
-	case "audio/mp2t", "audio/mpeg", "audio/mp3", "audio/mp4", "audio/ogg", "audio/wav", "audio/webm":
+	case "audio/flac", "audio/x-flac", "audio/mp2t", "audio/mpeg", "audio/mp3", "audio/mp4", "audio/ogg", "audio/wav", "audio/webm":
 		return true
 	case "video/mp4", "video/webm":
 		return true
@@ -881,11 +905,7 @@ func (a *Application) play(filenameOrUrl string, startTime int, contentType stri
 		return err
 	}
 
-	// NOTE: This isn't concurrent safe, but it doesn't need to be at the moment!
-	a.MediaStart()
-
-	// Send the command to the chromecast
-	a.sendMediaRecv(&cast.LoadMediaCommand{
+	loadCommand := &cast.LoadMediaCommand{
 		PayloadHeader: cast.LoadHeader,
 		CurrentTime:   startTime,
 		Autoplay:      true,
@@ -894,7 +914,22 @@ func (a *Application) play(filenameOrUrl string, startTime int, contentType stri
 			StreamType:  "BUFFERED",
 			ContentType: mi.contentType,
 		},
-	})
+	}
+	tracks, err := a.subtitlesTracks()
+	if err != nil {
+		return err
+	}
+	if len(tracks) > 0 {
+		loadCommand.Media.Tracks = tracks
+		loadCommand.Media.TextTrackStyle = &subtitlesTextTrackStyle
+		loadCommand.ActiveTrackIds = []int{subtitlesTrackID}
+	}
+
+	// NOTE: This isn't concurrent safe, but it doesn't need to be at the moment!
+	a.MediaStart()
+
+	// Send the command to the chromecast
+	a.sendMediaRecv(loadCommand)
 
 	// If we should detach from waiting for media to finish playing
 	// and this is a url loaded external media, then we can exit early.
@@ -1201,40 +1236,36 @@ type mediaItem struct {
 	transcode   bool
 }
 
+// contentTypeAndTranscode returns the content type to send a local file with,
+// and whether it has to be transcoded.
+//
+// Preserve a known content type even when transcoding is disabled, so the
+// receiver can select its decoder. Unknown files may still be sent as-is
+// without transcoding, leaving format detection to the receiver.
+func (a *Application) contentTypeAndTranscode(filename, contentType string, transcode bool) (string, bool) {
+	if contentType != "" {
+		return contentType, transcode
+	}
+
+	detected, _ := a.possibleContentType(filename)
+	if !transcode {
+		return detected, false
+	}
+	if detected == "" {
+		return "video/mp4", true
+	}
+	// If this is a media file we know the chromecast can play, then we
+	// don't need to transcode it.
+	return detected, !a.castPlayableContentType(detected)
+}
+
 func (a *Application) loadAndServeFiles(filenames []string, contentType string, transcode bool) ([]mediaItem, error) {
 	mediaItems := make([]mediaItem, len(filenames))
 	for i, filename := range filenames {
-		transcodeFile := transcode
 		if _, err := os.Stat(filename); err != nil {
 			return nil, errors.Wrapf(err, "unable to find %q", filename)
 		}
-		/*
-			We can play media for the following:
-
-			- if we have a filename with a known content type
-			- if we have a filename, and a specified contentType
-			- if we have a filename with an unknown content type, and transcode is true
-			-
-		*/
-		knownFileType := a.knownFileType(filename)
-		if !knownFileType && contentType == "" && !transcodeFile {
-			return nil, fmt.Errorf("unknown content-type for %q, either specify a content-type or set transcode to true", filename)
-		}
-
-		// If we have a content-type specified we should always
-		// attempt to use that
-		contentTypeToUse := contentType
-		if contentType != "" {
-		} else if knownFileType {
-			// If this is a media file we know the chromecast can play,
-			// then we don't need to transcode it.
-			contentTypeToUse, _ = a.possibleContentType(filename)
-			if a.castPlayableContentType(contentTypeToUse) {
-				transcodeFile = false
-			}
-		} else if transcodeFile {
-			contentTypeToUse = "video/mp4"
-		}
+		contentTypeToUse, transcodeFile := a.contentTypeAndTranscode(filename, contentType, transcode)
 
 		mediaItems[i] = mediaItem{
 			filename:    filename,
@@ -1312,6 +1343,7 @@ func (a *Application) startStreamingServer() error {
 	a.log("found available port :%d", a.serverPort)
 
 	a.httpServer = http.NewServeMux()
+	a.httpServer.HandleFunc(subtitlesPath, a.serveSubtitles)
 
 	a.httpServer.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Check to see if we have a 'filename' and if it is one of the ones that have

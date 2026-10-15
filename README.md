@@ -18,6 +18,7 @@ Supported Media formats:
 ```
 
 If an unknown video file is found, it will use `ffmpeg` to transcode it to MP4 and stream it to the chromecast.
+With `--transcode=false` the file is sent as it is, whatever it is, and it is up to the chromecast to play it.
 
 ## Play Local Media Files
 
@@ -71,6 +72,7 @@ Available Commands:
   mute        Mute the chromecast
   next        Play the next available media
   pause       Pause the currently playing media on the chromecast
+  playback-rate Set the playback rate of the currently playing media
   playlist    Load and play media on the chromecast
   previous    Play the previous available media
   restart     Restart the currently playing media
@@ -102,6 +104,7 @@ Flags:
   -i, --iface string         Network interface to use when looking for a local address to use for the http server or for use with multicast dns discovery
   -p, --port string          Port of the chromecast device if 'addr' is specified (default "8009")
   -u, --uuid string          chromecast device uuid
+      --ui-theme string      file with the colours of the UI (default "go-chromecast/theme.json" in the user config directory, if it exists)
       --verbose              verbose logging
       --version              display command version
       --with-ui              run with a UI
@@ -126,6 +129,9 @@ Found 2 cast dns entries, select one:
 Enter selection: 1
 Idle (Backdrop), volume=1.00 muted=false
 
+# Status of a cast device as json, useful for scripting.
+$ go-chromecast status --json | jq -r .media.media.metadata.title
+
 # Specify a cast device name.
 $ go-chromecast status -n "Living Room Speaker"
 Idle, volume=0.17 muted=false
@@ -143,6 +149,13 @@ $ go-chromecast load https://example.com/path/to/media.mp4
 
 # Load a local media file (can play both audio and video).
 $ go-chromecast load ~/Downloads/SampleAudio_0.4mb.mp3
+
+# Load a video with subtitles. They can be a WebVTT file (or its url), or any
+# other file that ffmpeg can convert to WebVTT: srt, ass, or a video with
+# embedded subtitles (the first ones, or the ones chosen with --subtitles-track).
+$ go-chromecast load ~/Downloads/video.mp4 --subtitles ~/Downloads/video.srt
+$ go-chromecast load ~/Downloads/video.mkv --subtitles ~/Downloads/video.mkv
+$ go-chromecast load ~/Downloads/video.mkv --subtitles ~/Downloads/video.mkv --subtitles-track 2
 Found 2 cast dns entries, select one:
 1) device="Chromecast" device_name="MarieGotGame?" address="192.168.0.115:8009" status="" uuid="b380c5847b3182e4fb2eb0d0e270bf16"
 2) device="Google Home Mini" device_name="Living Room Speaker" address="192.168.0.52:8009" status="" uuid="b87d86bed423a6feb8b91a7d2778b55c"
@@ -198,6 +211,9 @@ $ go-chromecast rewind 30
 # Go forward in the currently playing media by x seconds.
 $ go-chromecast seek 30
 
+# Play the currently playing media at 1.5x speed (0.5 to 2).
+$ go-chromecast playback-rate 1.5
+
 # Get the current volume level
 $ go-chromecast volume
 
@@ -252,6 +268,35 @@ Use the UI in combination with the `load` command (detailed above):
 
 ```
 $ go-chromecast --with-ui load /path/to/file.flac
+```
+
+### Colours
+
+The colours of the UI can be changed with a theme, a JSON file like this one (these are the default colours):
+
+```json
+{
+  "text": "blue",
+  "value": "bold blue",
+  "volume": "red",
+  "volume_muted": "bold red",
+  "progress": "yellow"
+}
+```
+
+Each colour is one of `default` (the foreground colour of the terminal), `black`, `red`, `green`, `yellow`,
+`blue`, `magenta`, `cyan` or `white`, optionally preceded by `bold`. The colours that aren't in the file keep
+their default value, so this is enough to have the text in the colour of the terminal:
+
+```json
+{"text": "default", "value": "bold"}
+```
+
+The theme is read from `go-chromecast/theme.json` in the user config directory (`~/.config` on Linux) if it
+exists, or from the file given with `--ui-theme`:
+
+```
+$ go-chromecast ui --ui-theme /path/to/theme.json
 ```
 
 ## HTTP API Server

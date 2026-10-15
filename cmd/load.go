@@ -103,4 +103,6 @@ func init() {
 	loadCmd.Flags().Int("start-time", 0, "start time to play media, in seconds")
 	loadCmd.Flags().Bool("repeat", false, "repeat the media forever via the receiver's native queue repeat, instead of the sender reloading it on every play-through. Ignores --with-ui, --detach and --start-time")
 	loadCmd.Flags().String("repeat-mode", "single", "receiver repeat mode used with --repeat: single repeats the current item; all cycles the queue")
+	loadCmd.Flags().Int("subtitles-track", 1, "which subtitles to use when the subtitles file has more than one, starting from 1")
+	loadCmd.Flags().String("subtitles", "", "subtitles to show: a file (if it isn't WebVTT it is converted with ffmpeg) or the url of a WebVTT file")
 }

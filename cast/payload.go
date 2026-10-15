@@ -7,20 +7,21 @@ const (
 
 var (
 	// Known Payload headers
-	ConnectHeader     = PayloadHeader{Type: "CONNECT"}
-	CloseHeader       = PayloadHeader{Type: "CLOSE"}
-	GetStatusHeader   = PayloadHeader{Type: "GET_STATUS"}
-	PongHeader        = PayloadHeader{Type: "PONG"}         // Response to PING payload
-	LaunchHeader      = PayloadHeader{Type: "LAUNCH"}       // Launches a new chromecast app
-	StopHeader        = PayloadHeader{Type: "STOP"}         // Stop playing current media
-	PlayHeader        = PayloadHeader{Type: "PLAY"}         // Plays / unpauses the running app
-	PauseHeader       = PayloadHeader{Type: "PAUSE"}        // Pauses the running app
-	SeekHeader        = PayloadHeader{Type: "SEEK"}         // Seek into the running app
-	VolumeHeader      = PayloadHeader{Type: "SET_VOLUME"}   // Sets the volume
-	LoadHeader        = PayloadHeader{Type: "LOAD"}         // Loads an application onto the chromecast
-	QueueLoadHeader   = PayloadHeader{Type: "QUEUE_LOAD"}   // Loads an application onto the chromecast
-	QueueUpdateHeader = PayloadHeader{Type: "QUEUE_UPDATE"} // Loads an application onto the chromecast
-	SkipHeader        = PayloadHeader{Type: "SKIP_AD"}      // Skip add based off https://developers.google.com/cast/docs/reference/web_receiver/cast.framework.messages#.SKIP_AD
+	ConnectHeader      = PayloadHeader{Type: "CONNECT"}
+	CloseHeader        = PayloadHeader{Type: "CLOSE"}
+	GetStatusHeader    = PayloadHeader{Type: "GET_STATUS"}
+	PongHeader         = PayloadHeader{Type: "PONG"}              // Response to PING payload
+	LaunchHeader       = PayloadHeader{Type: "LAUNCH"}            // Launches a new chromecast app
+	StopHeader         = PayloadHeader{Type: "STOP"}              // Stop playing current media
+	PlayHeader         = PayloadHeader{Type: "PLAY"}              // Plays / unpauses the running app
+	PauseHeader        = PayloadHeader{Type: "PAUSE"}             // Pauses the running app
+	SeekHeader         = PayloadHeader{Type: "SEEK"}              // Seek into the running app
+	VolumeHeader       = PayloadHeader{Type: "SET_VOLUME"}        // Sets the volume
+	LoadHeader         = PayloadHeader{Type: "LOAD"}              // Loads an application onto the chromecast
+	QueueLoadHeader    = PayloadHeader{Type: "QUEUE_LOAD"}        // Loads an application onto the chromecast
+	QueueUpdateHeader  = PayloadHeader{Type: "QUEUE_UPDATE"}      // Loads an application onto the chromecast
+	SkipHeader         = PayloadHeader{Type: "SKIP_AD"}           // Skip add based off https://developers.google.com/cast/docs/reference/web_receiver/cast.framework.messages#.SKIP_AD
+	PlaybackRateHeader = PayloadHeader{Type: "SET_PLAYBACK_RATE"} // Sets the playback rate of the playing media
 )
 
 type Payload interface {
@@ -71,6 +72,12 @@ type MediaHeader struct {
 	ResumeState    string  `json:"resumeState"`
 }
 
+type SetPlaybackRate struct {
+	PayloadHeader
+	MediaSessionId int     `json:"mediaSessionId"`
+	PlaybackRate   float32 `json:"playbackRate"`
+}
+
 type Volume struct {
 	Level float32 `json:"level,omitempty"`
 	Muted bool    `json:"muted"`
@@ -112,6 +119,8 @@ type LoadMediaCommand struct {
 	Autoplay    bool        `json:"autoplay"`
 	QueueData   QueueData   `json:"queueData"`
 	CustomData  interface{} `json:"customData"`
+	// ActiveTrackIds are the ids of the tracks of the media to enable.
+	ActiveTrackIds []int `json:"activeTrackIds,omitempty"`
 }
 
 type QueueData struct {
@@ -124,6 +133,30 @@ type MediaItem struct {
 	StreamType  string        `json:"streamType"`
 	Duration    float32       `json:"duration"`
 	Metadata    MediaMetadata `json:"metadata"`
+	// Tracks are the extra tracks of the media, ie: subtitles.
+	Tracks         []MediaTrack    `json:"tracks,omitempty"`
+	TextTrackStyle *TextTrackStyle `json:"textTrackStyle,omitempty"`
+}
+
+// MediaTrack is a track of a media item.
+// https://developers.google.com/cast/docs/reference/web_receiver/cast.framework.messages.Track
+type MediaTrack struct {
+	TrackId          int    `json:"trackId"`
+	Type             string `json:"type"`
+	Subtype          string `json:"subtype,omitempty"`
+	Name             string `json:"name,omitempty"`
+	Language         string `json:"language,omitempty"`
+	TrackContentId   string `json:"trackContentId,omitempty"`
+	TrackContentType string `json:"trackContentType,omitempty"`
+}
+
+// TextTrackStyle is how the text tracks are shown. Colours are "#RRGGBBAA".
+// https://developers.google.com/cast/docs/reference/web_receiver/cast.framework.messages.TextTrackStyle
+type TextTrackStyle struct {
+	BackgroundColor string `json:"backgroundColor,omitempty"`
+	ForegroundColor string `json:"foregroundColor,omitempty"`
+	EdgeType        string `json:"edgeType,omitempty"`
+	EdgeColor       string `json:"edgeColor,omitempty"`
 }
 
 type MediaMetadata struct {
@@ -144,6 +177,7 @@ type Image struct {
 type Media struct {
 	MediaSessionId int        `json:"mediaSessionId"`
 	PlayerState    string     `json:"playerState"`
+	PlaybackRate   float32    `json:"playbackRate"`
 	CurrentTime    float32    `json:"currentTime"`
 	IdleReason     string     `json:"idleReason"`
 	Volume         Volume     `json:"volume"`
